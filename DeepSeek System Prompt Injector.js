@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         DeepSeek System Prompt Injector
-// @name:zh-CN   深搜系统提示词
-// @version      3.5.1
-// @description:zh-CN 为DeepSeek AI设置自定义系统提示词（Nova风格UI，支持预设管理、导入导出、动态变量、编辑首条消息修复）
+// @name:zh-CN   ds系统提示词
+// @version      3.8.0
+// @description:zh-CN 为DeepSeek AI设置自定义系统提示词，支持多账号切换（Nova风格UI，预设管理、导入导出、动态变量、编辑首条消息修复、剪贴板清理）
 // @author       Shiki & 灰魂
 // @match        https://chat.deepseek.com
 // @match        https://chat.deepseek.com/*
@@ -10,6 +10,7 @@
 // @grant        GM_setValue
 // @grant        GM_addStyle
 // @grant        unsafeWindow
+// @grant        GM_xmlhttpRequest
 // @run-at       document-start
 // @license      MIT
 // ==/UserScript==
@@ -29,6 +30,9 @@
     const CURRENT_PRESET_KEY = "deepseek_current_preset";
     const PREFIX_KEY = "deepseek_message_prefix";
     const PREFIX_ENABLED_KEY = "deepseek_message_prefix_enabled";
+    const DEBUG_MODE_KEY = "deepseek_debug_mode_enabled";
+    const ACCOUNTS_KEY = "deepseek_accounts";
+    const CURRENT_ACCOUNT_KEY = "deepseek_current_account";
     // DeepSeek 网页端不同动作（发送/重试/编辑）可能命中不同接口；
     // 这里用“较宽”的匹配，再依赖 modifyRequestBody 内部的 JSON 结构判断兜底。
     const API_PATTERNS = [
@@ -67,10 +71,36 @@
     let currentPresetId = GM_getValue(CURRENT_PRESET_KEY, 'default');
     let messagePrefix = GM_getValue(PREFIX_KEY, "当前日期是 {date}，时间是 {time}。\n\n");
     let prefixEnabled = GM_getValue(PREFIX_ENABLED_KEY, false);
+    let debugModeEnabled = GM_getValue(DEBUG_MODE_KEY, false);
+    let accounts = GM_getValue(ACCOUNTS_KEY, []);
+    let currentAccountId = GM_getValue(CURRENT_ACCOUNT_KEY, null);
     const interceptedInstances = new WeakSet();
 
     function log(...args) {
         if (DEBUG) console.log("[DeepSeek SP]", ...args);
+    }
+
+    // ═══════════════════════════════════════
+    // 调试模式控制
+    // ═══════════════════════════════════════
+    function enableDebugMode() {
+        localStorage.setItem('__appKit_@deepseek/chat_debug', '{"value":true,"__version":"0"}');
+        debugModeEnabled = true;
+        GM_setValue(DEBUG_MODE_KEY, true);
+        log("Debug mode enabled");
+        location.reload();
+    }
+
+    function disableDebugMode() {
+        localStorage.setItem('__appKit_@deepseek/chat_debug', '{"value":false,"__version":"0"}');
+        localStorage.setItem('__appKit_@deepseek/chat_debugPanelEnabled', '{"value":false,"__version":"0"}');
+        localStorage.setItem('__debugVersionUpdateDisabled', '{"value":false,"__version":"20241018.1"}');
+        localStorage.removeItem('debugModelChannel');
+        localStorage.removeItem('debugLiteModelChannel');
+        debugModeEnabled = false;
+        GM_setValue(DEBUG_MODE_KEY, false);
+        log("Debug mode disabled");
+        location.reload();
     }
 
     // ═══════════════════════════════════════
@@ -215,11 +245,11 @@
         const newPreset = {
             id,
             name,
-            prompt: systemPrompt,
-            template: customTemplate,
-            useNative: useNativeFormat,
-            prefix: messagePrefix,
-            prefixEnabled: prefixEnabled
+            prompt: '',
+            template: DEFAULT_TEMPLATE,
+            useNative: true,
+            prefix: "当前日期是 {date}，时间是 {time}。\n\n",
+            prefixEnabled: false
         };
         presets.push(newPreset);
         currentPresetId = id;
@@ -268,7 +298,7 @@
     // ═══════════════════════════════════════
     function exportConfig() {
         const config = {
-            version: '3.5.1',
+            version: '3.6.1',
             exportTime: new Date().toISOString(),
             enabled: isEnabled,
             currentPresetId,
@@ -1066,7 +1096,7 @@
             color: var(--dsp-text-main);
             font-size: 13px;
             font-family: 'Monaco', 'Consolas', 'SF Mono', monospace;
-            resize: none;
+            resize: vertical;
             outline: none;
             transition: border-color 0.2s, box-shadow 0.2s;
             box-sizing: border-box;
@@ -1087,9 +1117,11 @@
             opacity: 0.6;
         }
         .dsp-textarea.prompt {
+            min-height: 60px;
             height: 100px;
         }
         .dsp-textarea.template {
+            min-height: 50px;
             height: 70px;
             font-size: 12px;
         }
@@ -1328,6 +1360,104 @@
                 transition-duration: 0.01ms !important;
             }
         }
+
+
+        /* 移动端竖屏适配：上移FAB避免遮挡发送按钮 */
+        @media (max-width: 768px) {
+            .dsp-fab-container {
+                bottom: 90px !important;
+                right: 16px !important;
+                gap: 6px !important;
+            }
+            .dsp-fab-container .dsp-fab {
+                width: 44px !important;
+                height: 44px !important;
+                --dsp-notch: 8px;
+            }
+            .dsp-fab-container .dsp-fab svg {
+                width: 24px !important;
+                height: 24px !important;
+            }
+            .dsp-fab-container .dsp-quick-toggle {
+                width: 30px !important;
+                height: 30px !important;
+            }
+            .dsp-fab-container .dsp-quick-toggle svg {
+                width: 15px !important;
+                height: 15px !important;
+            }
+            .dsp-panel {
+                bottom: 150px !important;
+                right: 12px !important;
+                width: calc(100vw - 24px) !important;
+                max-width: 400px !important;
+            }
+            .dsp-toast {
+                bottom: 160px !important;
+                right: 12px !important;
+            }
+        }
+
+        /* 账号切换面板 */
+        .dsp-account-panel {
+            /* 与主面板样式相同，额外微调 */
+        }
+        .dsp-account-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 12px;
+            background: var(--dsp-btn-bg);
+            border: 1px solid var(--dsp-btn-border);
+            clip-path: polygon(
+                0 4px, 4px 0,
+                calc(100% - 4px) 0, 100% 4px,
+                100% calc(100% - 4px), calc(100% - 4px) 100%,
+                4px 100%, 0 calc(100% - 4px)
+            );
+            transition: all 0.15s ease;
+        }
+        .dsp-account-item.current {
+            border-color: var(--dsp-accent-soft);
+            background: linear-gradient(180deg, #162d4a 0%, #132745 100%);
+            box-shadow: 0 0 12px rgba(42,168,255,0.08);
+        }
+        .dsp-account-item:hover {
+            border-color: var(--dsp-line-strong);
+        }
+        .dsp-account-info {
+            flex: 1;
+            min-width: 0;
+        }
+        .dsp-account-name {
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--dsp-text-main);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .dsp-account-token {
+            font-size: 10px;
+            color: var(--dsp-text-dim);
+            margin-top: 2px;
+            font-family: 'Monaco', 'Consolas', monospace;
+        }
+        .dsp-account-actions {
+            display: flex;
+            gap: 4px;
+            flex-shrink: 0;
+            margin-left: 8px;
+        }
+        .dsp-account-actions .dsp-preset-btn {
+            width: 28px;
+            height: 28px;
+        }
+        .dsp-account-actions .dsp-preset-btn svg {
+            width: 12px;
+            height: 12px;
+        }
+
     `);
 
     // ═══════════════════════════════════════
@@ -1338,6 +1468,199 @@
     const ICON_ADD = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`;
     const ICON_DELETE = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="m19 6-.867 12.142A2 2 0 0 1 16.138 20H7.862a2 2 0 0 1-1.995-1.858L5 6m5 0V4a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v2"/></svg>`;
     const ICON_RENAME = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>`;
+
+    // ═══════════════════════════════════════
+    // 多账号切换 - 图标
+    // ═══════════════════════════════════════
+    const ICON_ACCOUNT = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`;
+    const ICON_SWITCH = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="11" x2="21" y2="11"/><polyline points="8 21 3 21 3 16"/><line x1="20" y1="13" x2="3" y2="13"/></svg>`;
+
+    // ═══════════════════════════════════════
+    // 多账号切换 - 核心逻辑
+    // ═══════════════════════════════════════
+    function saveAccounts() {
+        GM_setValue(ACCOUNTS_KEY, accounts);
+        GM_setValue(CURRENT_ACCOUNT_KEY, currentAccountId);
+    }
+
+    function getCurrentToken() {
+        try {
+            const raw = localStorage.getItem('userToken');
+            if (!raw) return null;
+            try { return JSON.parse(raw).value || raw; } catch(e) { return raw; }
+        } catch(e) {
+            return null;
+        }
+    }
+
+    function getCurrentAccountName() {
+        const token = getCurrentToken();
+        if (!token) return '未登录';
+        const account = accounts.find(a => a.token === token);
+        if (account) return account.name;
+        if (currentAccountId) {
+            const acc = accounts.find(a => a.id === currentAccountId);
+            if (acc) return acc.name + ' (已变化)';
+        }
+        return '未命名账号';
+    }
+
+    function addAccount(name, email, password) {
+        // 检查邮箱是否已存在
+        const existing = email ? accounts.find(a => a.email === email) : null;
+        if (existing) {
+            alert('该邮箱已存在：' + existing.name);
+            return existing;
+        }
+        const id = 'acc_' + Date.now();
+        const token = getCurrentToken() || '';
+        const newAccount = { id, name: name.trim(), email: email || '', password: password || '', token, addedAt: Date.now() };
+        accounts.push(newAccount);
+        currentAccountId = id;
+        saveAccounts();
+        log("Added account:", name);
+        return newAccount;
+    }
+
+    function loginWithEmail(email, password) {
+        // 获取或生成 device_id
+        let deviceId = '';
+        try { deviceId = localStorage.getItem('device_id') || ''; } catch(e) {}
+        if (!deviceId) {
+            const arr = new Uint8Array(48);
+            crypto.getRandomValues(arr);
+            deviceId = btoa(String.fromCharCode(...arr));
+        }
+
+        return new Promise((resolve, reject) => {
+            log("Login request:", { email, deviceId: deviceId.substring(0, 20) + '...' });
+            GM_xmlhttpRequest({
+                method: 'POST',
+                url: 'https://chat.deepseek.com/api/v0/users/login',
+                anonymous: false,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-client-platform': 'web',
+                    'x-client-version': '2.0.0',
+                    'x-client-locale': 'zh_CN',
+                    'x-app-version': '2.0.0',
+                    'Origin': 'https://chat.deepseek.com',
+                    'Referer': 'https://chat.deepseek.com/sign_in'
+                },
+                data: JSON.stringify({
+                    email: email,
+                    mobile: '',
+                    password: password,
+                    area_code: '',
+                    device_id: deviceId,
+                    os: 'web'
+                }),
+                onload: function(resp) {
+                    log("Login response:", resp.status, resp.responseText.substring(0, 300));
+                    try {
+                        const data = JSON.parse(resp.responseText);
+                        const token = data?.data?.biz_data?.user?.token || data?.data?.user?.token || data?.data?.token || data?.token;
+                        if (token) {
+                            log("Login success, token:", token.substring(0, 20) + '...');
+                            resolve(token);
+                        } else {
+                            reject(new Error(data?.message || data?.msg || data?.error || '未获取到token'));
+                        }
+                    } catch(e) {
+                        reject(new Error('解析登录响应失败：' + resp.responseText.substring(0, 200)));
+                    }
+                },
+                onerror: function(e) {
+                    log("Login error:", e);
+                    reject(new Error('登录请求失败，状态码：' + (e?.status || '未知')));
+                },
+                ontimeout: function() {
+                    reject(new Error('登录请求超时'));
+                },
+                timeout: 15000
+            });
+        });
+    }
+
+    function switchAccount(accountId) {
+        const account = accounts.find(a => a.id === accountId);
+        if (!account) return false;
+        try {
+            // 如果有邮箱密码，走登录API获取新token（永不过期）
+            if (account.email && account.password) {
+                loginWithEmail(account.email, account.password).then(newToken => {
+                    localStorage.setItem('userToken', JSON.stringify({value: newToken, __version: "0"}));
+                    account.token = newToken;
+                    currentAccountId = accountId;
+                    saveAccounts();
+                    log("Switched to account (via login):", account.name);
+                    location.reload();
+                }).catch(err => {
+                    alert('登录失败：' + err.message + '\n\n请检查邮箱密码是否正确，或该账号可能尚未注册邮箱登录方式。');
+                });
+                return true;
+            }
+            // 旧方式：直接用保存的token
+            const wrapped = account.token.startsWith('{') ? account.token : JSON.stringify({value: account.token, __version: "0"});
+            localStorage.setItem('userToken', wrapped);
+            currentAccountId = accountId;
+            saveAccounts();
+            log("Switched to account (via token):", account.name);
+            return true;
+        } catch(e) {
+            log("Switch account error:", e);
+            return false;
+        }
+    }
+
+    function deleteAccount(accountId) {
+        const index = accounts.findIndex(a => a.id === accountId);
+        if (index > -1) {
+            accounts.splice(index, 1);
+            if (currentAccountId === accountId) {
+                currentAccountId = accounts.length > 0 ? accounts[0].id : null;
+            }
+            saveAccounts();
+            return true;
+        }
+        return false;
+    }
+
+    function renameAccount(accountId, newName) {
+        const account = accounts.find(a => a.id === accountId);
+        if (account) {
+            account.name = newName.trim();
+            saveAccounts();
+            return true;
+        }
+        return false;
+    }
+
+    function renderAccountListHTML() {
+        const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        if (accounts.length === 0) {
+            return '<div class="dsp-hint" style="text-align:center;padding:12px;">暂无保存的账号<br>点击下方按钮保存当前账号</div>';
+        }
+        return accounts.map(a => {
+            const isCurrent = a.id === currentAccountId;
+            const infoText = a.email ? a.email : (a.token ? a.token.substring(0, 12) + '...' : '(空)');
+            const timeStr = a.addedAt ? new Date(a.addedAt).toLocaleDateString() : '';
+            return `
+                <div class="dsp-account-item ${isCurrent ? 'current' : ''}" data-account-id="${a.id}">
+                    <div class="dsp-account-info">
+                        <div class="dsp-account-name">${esc(a.name)}</div>
+                        <div class="dsp-account-token">${esc(infoText)} · ${timeStr}</div>
+                    </div>
+                    <div class="dsp-account-actions">
+                        <button class="dsp-preset-btn dsp-account-switch" data-id="${a.id}" title="切换到此账号">${ICON_SWITCH}</button>
+                        <button class="dsp-preset-btn dsp-account-rename-btn" data-id="${a.id}" title="重命名">${ICON_RENAME}</button>
+                        <button class="dsp-preset-btn danger dsp-account-delete-btn" data-id="${a.id}" title="删除">${ICON_DELETE}</button>
+                    </div>
+                </div>
+            `;
+        }).join('');
+    }
+
 
     function createUI() {
         if (document.querySelector('.dsp-fab-container')) return;
@@ -1365,13 +1688,21 @@
         fabContainer.appendChild(quickToggle);
         fabContainer.appendChild(fab);
 
+        // 账号切换 FAB
+        const accountFab = document.createElement('button');
+        accountFab.className = 'dsp-fab dsp-account-fab';
+        accountFab.innerHTML = ICON_ACCOUNT;
+        accountFab.title = '多账号切换';
+        fabContainer.appendChild(accountFab);
+
+
         const panel = document.createElement('div');
         panel.className = 'dsp-panel';
         panel.innerHTML = `
             <div class="dsp-header">
                 <div class="dsp-header-main">
                     <div class="dsp-title">🎭 System Prompt</div>
-                    <div class="dsp-subtitle">DeepSeek · Injector v3.5.1</div>
+                    <div class="dsp-subtitle">DeepSeek · Injector v3.8.0</div>
                 </div>
                 <div class="dsp-toggle ${isEnabled ? 'on' : ''}" id="dsp-toggle"></div>
             </div>
@@ -1382,9 +1713,13 @@
                         <select class="dsp-preset-select" id="dsp-preset-select">
                             ${presets.map(p => `<option value="${p.id}" ${p.id === currentPresetId ? 'selected' : ''}>${p.name}</option>`).join('')}
                         </select>
-                        <button class="dsp-preset-btn" id="dsp-preset-add" title="新建预设">${ICON_ADD}</button>
+                        <button class="dsp-preset-btn" id="dsp-preset-add" title="新建空预设">${ICON_ADD}</button>
                         <button class="dsp-preset-btn" id="dsp-preset-rename" title="重命名">${ICON_RENAME}</button>
                         <button class="dsp-preset-btn danger" id="dsp-preset-delete" title="删除预设">${ICON_DELETE}</button>
+                    </div>
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:6px;">
+                        <button class="dsp-btn dsp-btn-secondary dsp-btn-small" id="dsp-export">📤 导出</button>
+                        <button class="dsp-btn dsp-btn-secondary dsp-btn-small" id="dsp-import">📥 导入</button>
                     </div>
                 </div>
 
@@ -1449,13 +1784,18 @@
                         <div id="dsp-preview-content"></div>
                     </div>
                 </div>
+
+                <div class="dsp-section">
+                    <div class="dsp-label">
+                        <span>🐛 调试模式</span>
+                        <div class="dsp-toggle dsp-toggle-small ${debugModeEnabled ? 'on' : ''}" id="dsp-debug-toggle"></div>
+                    </div>
+                    <div class="dsp-hint">
+                        开启后显示消息 ID 和 token 数（需刷新页面）
+                    </div>
+                </div>
             </div>
             <div class="dsp-footer">
-                <div class="dsp-footer-row three">
-                    <button class="dsp-btn dsp-btn-secondary dsp-btn-small" id="dsp-export">📤 导出</button>
-                    <button class="dsp-btn dsp-btn-secondary dsp-btn-small" id="dsp-import">📥 导入</button>
-                    <button class="dsp-btn dsp-btn-secondary dsp-btn-small" id="dsp-clear">🗑️ 清除</button>
-                </div>
                 <div class="dsp-footer-row">
                     <button class="dsp-btn dsp-btn-secondary" id="dsp-cancel">取消</button>
                     <button class="dsp-btn dsp-btn-primary" id="dsp-save">保存设置</button>
@@ -1467,6 +1807,152 @@
         document.body.appendChild(fabContainer);
         document.body.appendChild(panel);
 
+        // ═══════════════════════════════════════
+        // 账号面板
+        // ═══════════════════════════════════════
+        const accountPanel = document.createElement('div');
+        accountPanel.className = 'dsp-panel dsp-account-panel';
+        function refreshAccountPanel() {
+            const listEl = accountPanel.querySelector('#dsp-account-list');
+            const nameEl = accountPanel.querySelector('#dsp-current-account-name');
+            if (listEl) listEl.innerHTML = renderAccountListHTML();
+            if (nameEl) nameEl.textContent = '当前：' + getCurrentAccountName();
+            // 重新绑定事件
+            bindAccountPanelEvents();
+        }
+        function bindAccountPanelEvents() {
+            accountPanel.querySelectorAll('.dsp-account-switch').forEach(btn => {
+                btn.onclick = () => {
+                    const id = btn.dataset.id;
+                    if (switchAccount(id)) {
+                        // 邮箱登录方式内部已刷新；旧token方式需手动刷新
+                        const acc = accounts.find(a => a.id === id);
+                        if (!acc?.email) {
+                            location.reload();
+                        }
+                    }
+                };
+            });
+            accountPanel.querySelectorAll('.dsp-account-rename-btn').forEach(btn => {
+                btn.onclick = () => {
+                    const id = btn.dataset.id;
+                    const item = btn.closest('.dsp-account-item');
+                    const nameEl = item.querySelector('.dsp-account-name');
+                    const oldName = nameEl.textContent;
+                    const input = document.createElement('input');
+                    input.value = oldName;
+                    input.className = 'dsp-textarea template';
+                    input.style.cssText = 'height:28px;font-size:13px;padding:4px 8px;width:100%;';
+                    nameEl.replaceWith(input);
+                    input.focus();
+                    input.select();
+                    const done = () => {
+                        const v = input.value.trim();
+                        if (v && v !== oldName) { renameAccount(id, v); refreshAccountPanel(); }
+                        else { input.replaceWith(nameEl); }
+                    };
+                    input.addEventListener('blur', done);
+                    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { input.blur(); } if (e.key === 'Escape') { input.value = oldName; input.blur(); } });
+                };
+            });
+            accountPanel.querySelectorAll('.dsp-account-delete-btn').forEach(btn => {
+                btn.onclick = () => {
+                    const id = btn.dataset.id;
+                    const account = accounts.find(a => a.id === id);
+                    if (confirm('确定删除账号 "' + (account?.name || '') + '"？')) {
+                        deleteAccount(id);
+                        refreshAccountPanel();
+                    }
+                };
+            });
+        }
+        accountPanel.innerHTML = `
+            <div class="dsp-header">
+                <div class="dsp-header-main">
+                    <div class="dsp-title">👤 账号切换</div>
+                    <div class="dsp-subtitle" id="dsp-current-account-name">当前：${getCurrentAccountName()}</div>
+                </div>
+            </div>
+            <div class="dsp-body">
+                <div class="dsp-section">
+                    <div class="dsp-label">
+                        <span>已保存的账号</span>
+                        <span class="count">${accounts.length} 个</span>
+                    </div>
+                    <div id="dsp-account-list" style="display:flex;flex-direction:column;gap:8px;">
+                        ${renderAccountListHTML()}
+                    </div>
+                    <div style="margin-top:10px;">
+                        <div class="dsp-account-form" id="dsp-account-form" style="display:none;">
+                            <input class="dsp-textarea template" id="dsp-acc-name" placeholder="账号名称" style="height:32px;margin-bottom:6px;" value="${getCurrentAccountName()}">
+                            <input class="dsp-textarea template" id="dsp-acc-email" placeholder="邮箱地址" style="height:32px;margin-bottom:6px;">
+                            <input class="dsp-textarea template" id="dsp-acc-password" type="password" placeholder="密码" style="height:32px;margin-bottom:6px;">
+                            <div style="display:flex;gap:6px;">
+                                <button class="dsp-btn dsp-btn-primary dsp-btn-small" id="dsp-acc-save">💾 保存</button>
+                                <button class="dsp-btn dsp-btn-secondary dsp-btn-small" id="dsp-acc-cancel">取消</button>
+                            </div>
+                        </div>
+
+                        <button class="dsp-btn dsp-btn-secondary dsp-btn-small" id="dsp-account-add">➕ 添加账号</button>
+                    </div>
+                </div>
+            </div>
+            <div class="dsp-footer">
+                <button class="dsp-btn dsp-btn-secondary" id="dsp-account-close">关闭</button>
+            </div>
+        `;
+        document.body.appendChild(accountPanel);
+
+        // 账号面板事件
+        accountFab.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (panel.classList.contains('open')) {
+                panel.classList.remove('open');
+            }
+            accountPanel.classList.toggle('open');
+            if (accountPanel.classList.contains('open')) {
+                refreshAccountPanel();
+            }
+        });
+
+        accountPanel.querySelector('#dsp-account-close').addEventListener('click', () => {
+            accountPanel.classList.remove('open');
+        });
+
+        accountPanel.querySelector('#dsp-account-add').addEventListener('click', () => {
+            const form = accountPanel.querySelector('#dsp-account-form');
+            const btn = accountPanel.querySelector('#dsp-account-add');
+            if (form.style.display === 'none') {
+                form.style.display = 'block';
+                btn.textContent = '✖ 取消添加';
+                accountPanel.querySelector('#dsp-acc-name').value = getCurrentAccountName();
+                accountPanel.querySelector('#dsp-acc-email').value = '';
+                accountPanel.querySelector('#dsp-acc-password').value = '';
+            } else {
+                form.style.display = 'none';
+                btn.textContent = '➕ 添加账号';
+            }
+        });
+
+        accountPanel.querySelector('#dsp-acc-save').addEventListener('click', () => {
+            const name = accountPanel.querySelector('#dsp-acc-name').value.trim();
+            const email = accountPanel.querySelector('#dsp-acc-email').value.trim();
+            const password = accountPanel.querySelector('#dsp-acc-password').value;
+            if (!name || !email || !password) { alert('请填写完整信息'); return; }
+            addAccount(name, email, password);
+            accountPanel.querySelector('#dsp-account-form').style.display = 'none';
+            accountPanel.querySelector('#dsp-account-add').textContent = '➕ 添加账号';
+            refreshAccountPanel();
+        });
+
+        accountPanel.querySelector('#dsp-acc-cancel').addEventListener('click', () => {
+            accountPanel.querySelector('#dsp-account-form').style.display = 'none';
+            accountPanel.querySelector('#dsp-account-add').textContent = '➕ 添加账号';
+        });
+
+        bindAccountPanelEvents();
+
+
         // 元素引用
         const toggle = panel.querySelector('#dsp-toggle');
         const input = panel.querySelector('#dsp-input');
@@ -1477,7 +1963,6 @@
         const fmtCustom = panel.querySelector('#dsp-fmt-custom');
         const previewContent = panel.querySelector('#dsp-preview-content');
         const saveBtn = panel.querySelector('#dsp-save');
-        const clearBtn = panel.querySelector('#dsp-clear');
         const cancelBtn = panel.querySelector('#dsp-cancel');
         const exportBtn = panel.querySelector('#dsp-export');
         const importBtn = panel.querySelector('#dsp-import');
@@ -1490,6 +1975,7 @@
         const varsList = panel.querySelector('#dsp-vars-list');
         const prefixInput = panel.querySelector('#dsp-prefix-input');
         const prefixToggle = panel.querySelector('#dsp-prefix-toggle');
+        const debugToggle = panel.querySelector('#dsp-debug-toggle');
 
         function updatePreview() {
             const sysPrompt = input.value.trim() || '(系统提示词)';
@@ -1548,7 +2034,12 @@
         }
 
         // 事件绑定
-        fab.addEventListener('click', () => panel.classList.toggle('open'));
+        fab.addEventListener('click', () => {
+            if (accountPanel.classList.contains('open')) {
+                accountPanel.classList.remove('open');
+            }
+            panel.classList.toggle('open');
+        });
 
         quickToggle.addEventListener('click', (e) => {
             e.stopPropagation();
@@ -1569,9 +2060,13 @@
         });
 
         document.addEventListener('click', (e) => {
-            if (!panel.contains(e.target) && !fabContainer.contains(e.target)) {
+            const hitMain = panel.contains(e.target) || fabContainer.contains(e.target);
+
+            if (!hitMain) {
                 panel.classList.remove('open');
             }
+
+            // 账号面板不自动关闭（避免 prompt/confirm 弹窗误触），只能通过关闭按钮或 FAB 切换
         });
 
         toggle.addEventListener('click', () => {
@@ -1615,6 +2110,20 @@
             prefixEnabled = !prefixEnabled;
             prefixToggle.classList.toggle('on', prefixEnabled);
             GM_setValue(PREFIX_ENABLED_KEY, prefixEnabled);
+            updateFab();
+        });
+
+        // 调试模式开关
+        debugToggle.addEventListener('click', () => {
+            if (debugModeEnabled) {
+                if (confirm('确定关闭调试模式？页面将刷新。')) {
+                    disableDebugMode();
+                }
+            } else {
+                if (confirm('确定开启调试模式？页面将刷新。')) {
+                    enableDebugMode();
+                }
+            }
         });
 
         // 预设管理
@@ -1629,12 +2138,10 @@
         presetAdd.addEventListener('click', () => {
             const name = prompt('请输入新预设名称：');
             if (name && name.trim()) {
-                // 先保存当前内容到新预设
-                systemPrompt = input.value.trim();
-                customTemplate = templateInput.value || DEFAULT_TEMPLATE;
                 createPreset(name.trim());
-                refreshPresetSelect();
-                log("Created preset:", name);
+                loadPreset(presets[presets.length - 1].id);
+                syncUIFromState();
+                log("Created empty preset:", name);
             }
         });
 
@@ -1708,18 +2215,6 @@
             panel.classList.remove('open');
         });
 
-        clearBtn.addEventListener('click', () => {
-            if (confirm('确定清除当前提示词？')) {
-                input.value = '';
-                count.textContent = '0 字符';
-                systemPrompt = '';
-                GM_setValue(STORAGE_KEY, '');
-                updateCurrentPreset();
-                updateFab();
-                updatePreview();
-            }
-        });
-
         updatePreview();
     }
 
@@ -1750,7 +2245,7 @@
     }
 
     function cleanupDisplayedPrompts() {
-        if (!systemPrompt) return;
+        if (!systemPrompt && !(prefixEnabled && messagePrefix)) return;
 
         const allDivs = document.querySelectorAll('div');
 
@@ -1807,85 +2302,196 @@
 
     function cleanElement(el) {
         let html = el.innerHTML;
+        let text = el.textContent || '';
         let modified = false;
 
-        // 清理 HTML 转义的原生 token
-        const nativeRegexEscaped = new RegExp(
-            escapeRegExp(DS_TOKENS_ESCAPED.SYSTEM) +
-            '[\\s\\S]*?' +
-            escapeRegExp(DS_TOKENS_ESCAPED.USER),
-            'g'
-        );
-        if (nativeRegexEscaped.test(html)) {
-            html = html.replace(nativeRegexEscaped, '');
-            modified = true;
-            log("Cleaned HTML-escaped native tokens");
-        }
-
-        // 清理原生 token
-        const nativeRegexRaw = new RegExp(
-            escapeRegExp(DS_TOKENS.SYSTEM) +
-            '[\\s\\S]*?' +
-            escapeRegExp(DS_TOKENS.USER),
-            'g'
-        );
-        if (nativeRegexRaw.test(html)) {
-            html = html.replace(nativeRegexRaw, '');
-            modified = true;
-            log("Cleaned raw native tokens");
-        }
-
-        // 清理自定义模板格式
-        if (!useNativeFormat && systemPrompt.length > 10) {
-            const templatePrefix = customTemplate.split('{user}')[0] || '';
-            if (templatePrefix) {
-                const escapedSysPrompt = escapeRegExp(systemPrompt);
-                const customRegex = new RegExp(escapedSysPrompt + '\\s*(?:---)?\\s*', 'g');
-                if (customRegex.test(html)) {
-                    html = html.replace(customRegex, '');
-                    modified = true;
-                    log("Cleaned custom template format");
-                }
-            }
-        }
-
-        // 清理消息前缀（时间日期格式）
+        // 先清理消息前缀（必须在系统提示词之前，因为系统提示词清理会改变html/text）
         if (prefixEnabled && messagePrefix) {
-            // 构建一个能匹配已替换变量的正则表达式
-            // 例如 "当前日期是 {date}，时间是 {time}。\n\n"
-            // 需要匹配 "当前日期是 2026-02-02，时间是 06:55:00。"
+            // 改进策略：构建能匹配变量替换后的正则，找到匹配的结束位置，删除从开头到该位置的所有内容
 
-            // 方法：将模板中的变量替换为通用匹配模式
+            // 1. 先处理消息前缀中的特殊字符，构建正则模式
             let prefixPattern = messagePrefix;
 
-            // 替换所有变量为对应的正则模式
+            // 转义正则特殊字符（但保留换行符的处理）
+            prefixPattern = prefixPattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+            // 2. 将变量替换为对应的通配模式
             prefixPattern = prefixPattern
-                .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')  // 先转义正则特殊字符
                 .replace(/\\\{date\\\}/g, '\\d{4}-\\d{2}-\\d{2}')
                 .replace(/\\\{time\\\}/g, '\\d{2}:\\d{2}:\\d{2}')
                 .replace(/\\\{datetime\\\}/g, '\\d{4}-\\d{2}-\\d{2}\\s+\\d{2}:\\d{2}')
                 .replace(/\\\{year\\\}/g, '\\d{4}')
-                .replace(/\\\{month\\\}/g, '\\d{2}')
-                .replace(/\\\{day\\\}/g, '\\d{2}')
-                .replace(/\\\{hour\\\}/g, '\\d{2}')
-                .replace(/\\\{minute\\\}/g, '\\d{2}')
+                .replace(/\\\{month\\\}/g, '\\d{1,2}')
+                .replace(/\\\{day\\\}/g, '\\d{1,2}')
+                .replace(/\\\{hour\\\}/g, '\\d{1,2}')
+                .replace(/\\\{minute\\\}/g, '\\d{1,2}')
                 .replace(/\\\{weekday\\\}/g, '[日一二三四五六]')
                 .replace(/\\\{weekday_en\\\}/g, '(?:Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)')
                 .replace(/\\\{timestamp\\\}/g, '\\d+')
-                .replace(/\\\{random\\\}/g, '[a-z0-9]+');
+                .replace(/\\\{random\\\}/g, '[a-zA-Z0-9]+');
 
-            // 处理换行符
-            prefixPattern = prefixPattern.replace(/\\n/g, '(?:<br\\s*/?>|\\n|\\s*)');
+            // 3. 处理换行符（匹配各种形式的换行）
+            // 关键：让用户前缀中的 \n 能匹配实际文本中的换行
+            prefixPattern = prefixPattern.replace(/\\n/g, '(?:\\s*\\n\\s*|\\s*<br\\s*/?>\\s*|\\s{2,})*');
+
+            // 4. 使用非贪婪匹配来找到前缀的结束位置
+            // 匹配模式：前缀内容 + 后续的分隔符（冒号、换行等）
+            const fullPattern = '^(' + prefixPattern + ')(?::|：|\\s*\\n\\s*|\\s*<br\\s*/?>\\s*|\\s{2,})*';
+
+            log("Prefix cleanup pattern:", fullPattern.substring(0, 150));
 
             try {
-                const prefixRegex = new RegExp(prefixPattern, 'g');
-                if (prefixRegex.test(html)) {
-                    html = html.replace(prefixRegex, '');
-                    modified = true;
-                    log("Cleaned message prefix");
+                const regex = new RegExp(fullPattern, 'i');
+                const match = text.match(regex);
+
+                if (match) {
+                    const matchedPrefix = match[0];  // 完整匹配的内容（包括分隔符）
+                    const prefixContent = match[1];  // 前缀内容部分
+
+                    log("Matched prefix length:", matchedPrefix.length, "content length:", prefixContent.length);
+
+                    // 5. 在HTML中找到这个前缀的结束位置
+                    // 方法：通过字符位置映射
+                    // 先找到 prefixContent 在 text 中的结束位置
+                    const prefixEndInText = text.indexOf(prefixContent) + prefixContent.length;
+
+                    // 6. 现在需要在HTML中删除从开头到对应位置的内容
+                    // 方法：逐个字符在HTML中定位
+                    let textPos = 0;
+                    let htmlPos = 0;
+                    let foundHtmlEndPos = -1;
+
+                    while (htmlPos < html.length && textPos < text.length) {
+                        const htmlChar = html[htmlPos];
+
+                        // 跳过HTML标签
+                        if (htmlChar === '<') {
+                            const tagEnd = html.indexOf('>', htmlPos);
+                            if (tagEnd > htmlPos) {
+                                htmlPos = tagEnd + 1;
+                                continue;
+                            }
+                        }
+
+                        // 跳过HTML实体（如 &nbsp;）
+                        if (htmlChar === '&') {
+                            const semiColonPos = html.indexOf(';', htmlPos);
+                            if (semiColonPos > htmlPos && semiColonPos - htmlPos < 10) {
+                                // 这是一个实体，对应文本中的一个字符或空格
+                                htmlPos = semiColonPos + 1;
+                                textPos++;  // 实体通常对应一个文本字符
+                                continue;
+                            }
+                        }
+
+                        // 比较字符
+                        if (htmlChar === text[textPos]) {
+                            textPos++;
+                            htmlPos++;
+
+                            // 检查是否到达了前缀的结束位置
+                            if (textPos >= prefixEndInText) {
+                                // 找到了！还要包括后续的分隔符
+                                foundHtmlEndPos = htmlPos;
+
+                                // 继续扫描，跳过可能的分隔符（在HTML中）
+                                while (foundHtmlEndPos < html.length) {
+                                    const remainingHtml = html.substring(foundHtmlEndPos);
+                                    // 匹配分隔符：标签、空格、冒号、换行符等
+                                    const separatorMatch = remainingHtml.match(/^(?:\s|<[^>]+>|&nbsp;|:|：|<br\s*\/?>|\*\s*)+/i);
+                                    if (separatorMatch) {
+                                        foundHtmlEndPos += separatorMatch[0].length;
+                                    }
+                                    break;  // 只处理一次
+                                }
+                                break;
+                            }
+                        } else {
+                            // 字符不匹配，可能是空白字符的差异
+                            if (/\s/.test(htmlChar) && /\s/.test(text[textPos])) {
+                                // 都是空白，同步前进
+                                htmlPos++;
+                                textPos++;
+                            } else {
+                                // 真正的不匹配，跳到下一个HTML字符
+                                htmlPos++;
+                            }
+                        }
+                    }
+
+                    if (foundHtmlEndPos > 0) {
+                        // 删除从开头到 foundHtmlEndPos 的所有内容
+                        html = html.substring(foundHtmlEndPos);
+                        modified = true;
+                        log("Cleaned message prefix (char mapping), removed", foundHtmlEndPos, "chars from HTML");
+                    } else {
+                        log("Failed to map prefix to HTML position");
+                    }
+                } else {
+                    log("Prefix pattern did not match text");
                 }
             } catch (e) {
-                log("Prefix regex error:", e);
+                log("Prefix cleanup error:", e);
+            }
+
+            // 7. 如果正则方法失败，回退到简单方法：查找最后一个固定段落
+            if (!modified) {
+                // 提取所有固定段落（非变量部分）
+                const fixedParts = messagePrefix.split(/\{[^}]+\}/).filter(p => p.trim().length >= 3);
+
+                if (fixedParts.length > 0) {
+                    // 使用最长的一个作为搜索目标
+                    const searchPart = fixedParts.sort((a, b) => b.length - a.length)[0].trim();
+
+                    if (text.includes(searchPart)) {
+                        // 在文本中找到位置
+                        const partIndex = text.indexOf(searchPart);
+                        const endInText = partIndex + searchPart.length;
+
+                        // 映射到HTML
+                        let textPos = 0;
+                        let htmlPos = 0;
+
+                        while (htmlPos < html.length && textPos < endInText) {
+                            const htmlChar = html[htmlPos];
+
+                            if (htmlChar === '<') {
+                                const tagEnd = html.indexOf('>', htmlPos);
+                                if (tagEnd > htmlPos) {
+                                    htmlPos = tagEnd + 1;
+                                    continue;
+                                }
+                            }
+
+                            if (htmlChar === '&') {
+                                const semiColonPos = html.indexOf(';', htmlPos);
+                                if (semiColonPos > htmlPos && semiColonPos - htmlPos < 10) {
+                                    htmlPos = semiColonPos + 1;
+                                    textPos++;
+                                    continue;
+                                }
+                            }
+
+                            if (htmlChar === text[textPos]) {
+                                textPos++;
+                            }
+                            htmlPos++;
+                        }
+
+                        if (htmlPos > 0 && htmlPos <= html.length) {
+                            // 跳过后续的分隔符
+                            const afterMatch = html.substring(htmlPos);
+                            const skipMatch = afterMatch.match(/^(?:\s|<[^>]+>|&nbsp;|:|：|<br\s*\/?>|\*\s*)+/i);
+                            if (skipMatch) {
+                                htmlPos += skipMatch[0].length;
+                            }
+
+                            html = html.substring(htmlPos);
+                            modified = true;
+                            log("Cleaned message prefix (fallback char mapping)");
+                        }
+                    }
+                }
             }
         }
 
@@ -1916,10 +2522,10 @@
 
             clearTimeout(window._dspCleanupTimeout);
             window._dspCleanupTimeout = setTimeout(() => {
-                if (systemPrompt && isEnabled) {
+                if ((systemPrompt && isEnabled) || (prefixEnabled && messagePrefix)) {
                     cleanupDisplayedPrompts();
                 }
-            }, 100);
+            }, 50);
         });
 
         observer.observe(document.body, {
@@ -1942,6 +2548,117 @@
     `);
 
     // ═══════════════════════════════════════
+    // 剪贴板拦截 - 清理复制内容中的注入部分
+    // ═══════════════════════════════════════
+    function cleanTextForClipboard(text) {
+        if (!text) return text;
+        let cleaned = text;
+
+        // 清理原生 token（<｜System｜>...<｜User｜>）
+        if (systemPrompt) {
+            const nativePattern = new RegExp(
+                escapeRegExp(DS_TOKENS.SYSTEM) + '[\\s\\S]*?' + escapeRegExp(DS_TOKENS.USER),
+                'g'
+            );
+            cleaned = cleaned.replace(nativePattern, '');
+        }
+
+        // 清理自定义模板格式
+        if (!useNativeFormat && systemPrompt && systemPrompt.length > 10) {
+            const escapedSysPrompt = escapeRegExp(systemPrompt);
+            const customRegex = new RegExp(escapedSysPrompt + '\\s*(?:---)?\\s*', 'g');
+            cleaned = cleaned.replace(customRegex, '');
+        }
+
+        // 清理消息前缀（变量已替换后的格式）
+        if (prefixEnabled && messagePrefix) {
+            let prefixPattern = messagePrefix;
+            prefixPattern = prefixPattern
+                .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+                .replace(/\\\{date\\\}/g, '\\d{4}-\\d{2}-\\d{2}')
+                .replace(/\\\{time\\\}/g, '\\d{2}:\\d{2}:\\d{2}')
+                .replace(/\\\{datetime\\\}/g, '\\d{4}-\\d{2}-\\d{2}\\s+\\d{2}:\\d{2}')
+                .replace(/\\\{year\\\}/g, '\\d{4}')
+                .replace(/\\\{month\\\}/g, '\\d{2}')
+                .replace(/\\\{day\\\}/g, '\\d{2}')
+                .replace(/\\\{hour\\\}/g, '\\d{2}')
+                .replace(/\\\{minute\\\}/g, '\\d{2}')
+                .replace(/\\\{weekday\\\}/g, '[日一二三四五六]')
+                .replace(/\\\{weekday_en\\\}/g, '(?:Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)')
+                .replace(/\\\{timestamp\\\}/g, '\\d+')
+                .replace(/\\\{random\\\}/g, '[a-z0-9]+');
+            prefixPattern = prefixPattern.replace(/\\n/g, '\\n');
+
+            try {
+                cleaned = cleaned.replace(new RegExp(prefixPattern, 'g'), '');
+            } catch (e) {
+                log("Clipboard prefix regex error:", e);
+            }
+        }
+
+        return cleaned;
+    }
+
+    function interceptClipboard() {
+        // 拦截 copy 事件（覆盖选中复制）
+        document.addEventListener('copy', (e) => {
+            const selection = window.getSelection();
+            if (!selection || selection.isCollapsed) return;
+
+            const text = selection.toString();
+            const cleanedText = cleanTextForClipboard(text);
+
+            if (text !== cleanedText) {
+                e.preventDefault();
+                e.clipboardData.setData('text/plain', cleanedText);
+                log("Cleaned copy selection content");
+            }
+        });
+
+        // 拦截 navigator.clipboard.writeText（DeepSeek 复制按钮可能用这个）
+        const clipboard = unsafeWindow.navigator.clipboard;
+        if (clipboard && clipboard.writeText) {
+            const originalWriteText = clipboard.writeText.bind(clipboard);
+            unsafeWindow.navigator.clipboard.writeText = async function(text) {
+                const cleanedText = cleanTextForClipboard(text);
+                if (text !== cleanedText) {
+                    log("Cleaned clipboard.writeText content");
+                }
+                return originalWriteText(cleanedText);
+            };
+        }
+
+        // 拦截 execCommand('copy')（某些旧式复制按钮可能用这个）
+        const originalExecCommand = unsafeWindow.document.execCommand?.bind(unsafeWindow.document);
+        if (originalExecCommand) {
+            unsafeWindow.document.execCommand = function(cmd, ...args) {
+                if (cmd === 'copy') {
+                    const selection = window.getSelection();
+                    if (selection && !selection.isCollapsed) {
+                        const text = selection.toString();
+                        const cleanedText = cleanTextForClipboard(text);
+                        if (text !== cleanedText) {
+                            // 创建一个临时元素来放清理后的文本
+                            const tempEl = document.createElement('textarea');
+                            tempEl.value = cleanedText;
+                            tempEl.style.cssText = 'position:fixed;left:-9999px;top:-9999px;';
+                            document.body.appendChild(tempEl);
+                            tempEl.select();
+                            const result = originalExecCommand('copy');
+                            document.body.removeChild(tempEl);
+                            // 恢复原来的选区
+                            return result;
+                        }
+                    }
+                }
+                return originalExecCommand(cmd, ...args);
+            };
+        }
+
+        log("Clipboard interception setup");
+    }
+
+    // ═══════════════════════════════════════
     // 初始化
     // ═══════════════════════════════════════
     interceptXHR();
@@ -1951,15 +2668,17 @@
         document.addEventListener('DOMContentLoaded', () => {
             createUI();
             setupDOMObserver();
-            setTimeout(cleanupDisplayedPrompts, 500);
+            interceptClipboard();
+            setTimeout(cleanupDisplayedPrompts, 200);
         });
     } else {
         setTimeout(() => {
             createUI();
             setupDOMObserver();
-            setTimeout(cleanupDisplayedPrompts, 500);
+            interceptClipboard();
+            setTimeout(cleanupDisplayedPrompts, 200);
         }, 100);
     }
 
-    log("Initialized v3.5.1 (Nova Silent Sky UI + Presets + Variables + Edit First Message Fix)");
+    log("Initialized v3.8.0 (Nova Silent Sky UI + Multi-Account Email Login + Presets + Variables + Edit First Message Fix + Clipboard Cleanup) (Nova Silent Sky UI + Multi-Account Switcher + Presets + Variables + Edit First Message Fix + Clipboard Cleanup) (Nova Silent Sky UI + Presets + Variables + Edit First Message Fix + Clipboard Cleanup + Resizable Textarea)");
 })();
